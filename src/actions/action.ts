@@ -1,124 +1,222 @@
 "use server";
 import db from "@/drizzle/db";
 import { columns, todos } from "@/drizzle/schema";
-import { eq, max } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
+import { revalidatePath } from "next/cache";
+import { auth } from "@/auth";
 
-export const getColumns = async () => {
-  return await db.select().from(columns);
-};
+// Columns Actions
+export async function getColumns() {
+  try {
+    return await db.select().from(columns).orderBy(columns.order);
+  } catch (error) {
+    console.error("Error fetching columns:", error);
+    return [];
+  }
+}
 
-export const getColumn = async (id: number) => {
-  return await db.select().from(columns).where(eq(columns.id, id));
-};
+export async function addColumn(title: string) {
+  try {
+    // Calculate the next order value
+    const maxOrderResult = await db
+      .select({ maxOrder: sql<number>`max(${columns.order})` })
+      .from(columns);
 
-export const addColumn = async (title: string) => {
-  return await db.insert(columns).values({ title }).returning();
-};
+    const nextOrder = (maxOrderResult[0].maxOrder || 0) + 1;
 
-export const deleteColumn = async (id: number) => {
-  await db.delete(columns).where(eq(columns.id, id));
-};
+    return await db
+      .insert(columns)
+      .values({
+        title,
+        order: nextOrder,
+      })
+      .returning();
+  } catch (error) {
+    console.error("Error adding column:", error);
+    throw error;
+  }
+}
 
-export const getTodos = async (columnId: number) => {
-  return await db
-    .select()
-    .from(todos)
-    .where(eq(todos.columnId, columnId))
-    .orderBy(todos.order);
-};
+export async function deleteColumn(columnId: number) {
+  try {
+    // First, delete all todos in this column
+    await db.delete(todos).where(eq(todos.columnId, columnId));
 
-export const addTodo = async (
+    // Then delete the column
+    await db.delete(columns).where(eq(columns.id, columnId));
+
+    revalidatePath("/");
+  } catch (error) {
+    console.error("Error deleting column:", error);
+    throw error;
+  }
+}
+
+// Todos Actions
+export async function getTodosByColumn(columnId: number) {
+  try {
+    return await db
+      .select()
+      .from(todos)
+      .where(eq(todos.columnId, columnId))
+      .orderBy(todos.order);
+  } catch (error) {
+    console.error("Error fetching todos for column:", error);
+    return [];
+  }
+}
+
+export async function addTodo(
   title: string,
-  dueDate: Date,
+  dueDate: Date | null,
   columnId: number
-) => {
-  const maxOrderResult = await db
-    .select({ maxOrder: max(todos.order) })
-    .from(todos)
-    .where(eq(todos.columnId, columnId));
+) {
+  try {
+    // Calculate the next order value for todos in this column
+    const maxOrderResult = await db
+      .select({ maxOrder: sql<number>`max(${todos.order})` })
+      .from(todos)
+      .where(eq(todos.columnId, columnId));
 
-  const currentMaxOrder = maxOrderResult[0]?.maxOrder ?? 0;
-  return await db
-    .insert(todos)
-    .values({
-      title,
-      dueDate: dueDate.toISOString(),
-      columnId,
-      order: currentMaxOrder + 1,
-    })
-    .returning();
-};
+    const nextOrder = (maxOrderResult[0].maxOrder || 0) + 1;
 
-export const deleteTodo = async (id: number) => {
-  await db.delete(todos).where(eq(todos.id, id));
-};
+    return await db
+      .insert(todos)
+      .values({
+        title,
+        dueDate: dueDate?.toISOString(),
+        columnId,
+        order: nextOrder,
+      })
+      .returning();
+  } catch (error) {
+    console.error("Error adding todo:", error);
+    throw error;
+  }
+}
 
-export const moveTodoBetweenColumns = async (
+export async function deleteTodo(todoId: number) {
+  try {
+    await db.delete(todos).where(eq(todos.id, todoId));
+    revalidatePath("/");
+  } catch (error) {
+    console.error("Error deleting todo:", error);
+    throw error;
+  }
+}
+
+// Reordering Actions
+export async function reorderTodos(
+  columnId: number,
   todoId: number,
-  sourceColumnId: number,
-  destColumnId: number,
-  newOrder: number
-) => {
-  // Update todo's column and order
-  await db
-    .update(todos)
-    .set({
-      columnId: destColumnId,
-      order: newOrder,
-    })
-    .where(eq(todos.id, todoId));
+  sourceIndex: number,
+  destinationIndex: number
+) {
+  try {
+    // Fetch todos in the column to reorder
+    const columnTodos = await db
+      .select()
+      .from(todos)
+      .where(eq(todos.columnId, columnId))
+      .orderBy(todos.order);
 
-  // Fetch todos in destination column
-  const destTodos = await db
-    .select()
-    .from(todos)
-    .where(eq(todos.columnId, destColumnId))
-    .orderBy(todos.order);
+    // Remove the moved todo from its original position
+    const [movedTodo] = columnTodos.splice(sourceIndex, 1);
 
-  // Manually adjust orders for todos after insertion point
-  for (let i = 0; i < destTodos.length; i++) {
-    if (i >= newOrder && destTodos[i].id !== todoId) {
+    // Insert the todo at the new position
+    columnTodos.splice(destinationIndex, 0, movedTodo);
+
+    // Update orders for all todos in the column
+    for (let i = 0; i < columnTodos.length; i++) {
       await db
         .update(todos)
-        .set({ order: i + 1 })
+        .set({ order: i })
+        .where(eq(todos.id, columnTodos[i].id));
+    }
+
+    revalidatePath("/");
+  } catch (error) {
+    console.error("Error reordering todos:", error);
+    throw error;
+  }
+}
+
+export async function moveTodoBetweenColumns(
+  todoId: number,
+  sourceColumnId: number,
+  destinationColumnId: number,
+  sourceIndex: number,
+  destinationIndex: number
+) {
+  try {
+    // Update the todo's column
+    await db
+      .update(todos)
+      .set({ columnId: destinationColumnId })
+      .where(eq(todos.id, todoId));
+
+    // Fetch and reorder todos in source column
+    const sourceTodos = await db
+      .select()
+      .from(todos)
+      .where(eq(todos.columnId, sourceColumnId))
+      .orderBy(todos.order);
+
+    // Remove the moved todo from source column
+    sourceTodos.splice(sourceIndex, 1);
+
+    // Update orders for source column
+    for (let i = 0; i < sourceTodos.length; i++) {
+      await db
+        .update(todos)
+        .set({ order: i })
+        .where(eq(todos.id, sourceTodos[i].id));
+    }
+
+    // Fetch and reorder todos in destination column
+    const destTodos = await db
+      .select()
+      .from(todos)
+      .where(eq(todos.columnId, destinationColumnId))
+      .orderBy(todos.order);
+
+    // Insert the moved todo at the new position
+    destTodos.splice(destinationIndex, 0, { id: todoId } as any);
+
+    // Update orders for destination column
+    for (let i = 0; i < destTodos.length; i++) {
+      await db
+        .update(todos)
+        .set({ order: i })
         .where(eq(todos.id, destTodos[i].id));
     }
+
+    revalidatePath("/");
+  } catch (error) {
+    console.error("Error moving todo between columns:", error);
+    throw error;
+  }
+}
+
+export const sendEmail = async () => {
+  const user = await auth();
+  try {
+    await fetch("http://localhost:3000/api/send", {
+      body: JSON.stringify({ email: user?.user?.email }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+  } catch (error) {
+    console.error("Error sending email:", error);
+    throw error;
   }
 };
 
-export const reorderTodos = async (
-  columnId: number,
-  todoId: number,
-  newOrder: number
-) => {
-  // Fetch todos in the column
-  const columnTodos = await db
-    .select()
-    .from(todos)
-    .where(eq(todos.columnId, columnId))
-    .orderBy(todos.order);
-
-  // Manually adjust orders
-  for (let i = 0; i < columnTodos.length; i++) {
-    const todo = columnTodos[i];
-
-    if (todo.id === todoId) {
-      // Move the specific todo to new order
-      await db
-        .update(todos)
-        .set({ order: newOrder })
-        .where(eq(todos.id, todoId));
-    } else if (
-      (i < newOrder && todo.order! <= newOrder) ||
-      (i > newOrder && todo.order! >= newOrder)
-    ) {
-      // Shift orders for surrounding todos
-      const newOrderValue = i < newOrder ? todo.order : todo.order! + 1;
-
-      await db
-        .update(todos)
-        .set({ order: newOrderValue })
-        .where(eq(todos.id, todo.id));
-    }
+export const getAllTodo = async () => {
+  try {
+    return await db.select().from(todos);
+  } catch (error) {
+    console.error("Error fetching todos:", error);
+    return [];
   }
 };

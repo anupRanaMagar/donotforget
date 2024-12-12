@@ -6,7 +6,6 @@ import {
   primaryKey,
   integer,
   serial,
-  varchar,
   date,
 } from "drizzle-orm/pg-core";
 
@@ -99,13 +98,14 @@ export const columns = pgTable("columns", {
 export const todos = pgTable("todos", {
   id: serial("id").primaryKey(),
   title: text("title").notNull(),
-  columnId: integer("column_id").references(() => columns.id, {
-    onDelete: "cascade",
-  }),
   dueDate: date("due_date"),
   createdAt: timestamp("created_at").defaultNow(),
   order: integer("order").default(0),
+  columnId: integer("column_id").references(() => columns.id, {
+    onDelete: "cascade",
+  }),
 });
 
+// Type definitions
 export type columnType = typeof columns.$inferSelect;
 export type todoType = typeof todos.$inferSelect;

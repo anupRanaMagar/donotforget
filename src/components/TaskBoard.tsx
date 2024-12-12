@@ -3,22 +3,35 @@ import {
   getColumns,
   addColumn,
   deleteColumn,
+  getTodosByColumn,
   reorderTodos,
   moveTodoBetweenColumns,
 } from "@/actions/action";
 import Column from "./Column";
 import { DragDropContext, DropResult } from "react-beautiful-dnd";
 import { columnType, todoType } from "@/drizzle/schema";
-import { todo } from "node:test";
+import { Button } from "./ui/button";
+import { PlusCircle } from "lucide-react";
+import { Input } from "./ui/input";
 
 const TaskBoard: FC = () => {
-  const [columns, setColumns] = useState<columnType[]>([]);
+  const [columns, setColumns] = useState<
+    (columnType & { todos: todoType[] })[]
+  >([]);
   const [columnTitle, setColumnTitle] = useState("");
 
   const fetchColumns = async () => {
     const fetchedColumns = await getColumns();
 
-    setColumns(fetchedColumns);
+    // Fetch todos for each column
+    const columnsWithTodos = await Promise.all(
+      fetchedColumns.map(async (column) => {
+        const todos = await getTodosByColumn(column.id);
+        return { ...column, todos };
+      })
+    );
+
+    setColumns(columnsWithTodos);
   };
 
   useEffect(() => {
@@ -28,7 +41,7 @@ const TaskBoard: FC = () => {
   const handleAddColumn = async () => {
     if (!columnTitle.trim()) return;
     const newColumn = await addColumn(columnTitle);
-    setColumns((prev) => [...prev, newColumn[0]]);
+    setColumns((prev) => [...prev, { ...newColumn[0], todos: [] }]);
     setColumnTitle("");
   };
 
@@ -51,75 +64,103 @@ const TaskBoard: FC = () => {
 
     const sourceColumnId = parseInt(source.droppableId);
     const destinationColumnId = parseInt(destination.droppableId);
-    const todoId = parseInt(draggableId.split("-")[1]);
+    const todoId = parseInt(draggableId);
+
+    // Optimistic UI Update
+    const updatedColumns = [...columns];
+
+    if (sourceColumnId === destinationColumnId) {
+      // Reorder within the same column
+      const column = updatedColumns.find((col) => col.id === sourceColumnId);
+      if (column) {
+        const [movedTodo] = column.todos.splice(source.index, 1);
+        column.todos.splice(destination.index, 0, movedTodo);
+      }
+    } else {
+      // Move between columns
+      const sourceColumn = updatedColumns.find(
+        (col) => col.id === sourceColumnId
+      );
+      const destinationColumn = updatedColumns.find(
+        (col) => col.id === destinationColumnId
+      );
+
+      if (sourceColumn && destinationColumn) {
+        const [movedTodo] = sourceColumn.todos.splice(source.index, 1);
+        destinationColumn.todos.splice(destination.index, 0, movedTodo);
+      }
+    }
+
+    setColumns(updatedColumns); // Update the state immediately
 
     try {
-      // Optimistic UI update
-      const updatedColumns = columns.map((column) => {
-        // if (column.id === sourceColumnId || column.id === destinationColumnId) {
-        // return { ...column };
-
-        return column;
-      });
-
-      setColumns(updatedColumns);
-
-      // Perform server-side action
+      // Perform async actions
       if (sourceColumnId === destinationColumnId) {
         await reorderTodos(
-          Number(source.droppableId),
-          Number(draggableId),
+          sourceColumnId,
+          todoId,
+          source.index,
           destination.index
         );
       } else {
         await moveTodoBetweenColumns(
-          Number(draggableId),
-          Number(source.droppableId),
-          Number(destination.droppableId),
+          todoId,
+          sourceColumnId,
+          destinationColumnId,
+          source.index,
           destination.index
         );
       }
+
+      // Refetch to ensure consistency
       await fetchColumns();
     } catch (error) {
       console.error("Drag and drop failed:", error);
-      // Optionally, revert the optimistic update
+      // Revert to consistent state in case of failure
       await fetchColumns();
     }
   };
 
   return (
-    <div className="flex flex-col items-center p-4 flex-grow">
-      <h1 className="text-2xl font-bold mb-4">Task Board</h1>
-      <div className="flex gap-2 mb-4">
-        <input
-          type="text"
-          value={columnTitle}
-          onChange={(e) => setColumnTitle(e.target.value)}
-          placeholder="New Column"
-          className="p-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-        />
-        <button
-          onClick={handleAddColumn}
-          className="bg-blue-500 text-white px-4 py-2 rounded-md hover:bg-blue-600 transition-colors"
-        >
-          Add Column
-        </button>
-      </div>
-      <DragDropContext onDragEnd={onDragEnd}>
-        <div className="flex gap-6 overflow-x-auto w-full max-w-[95%] pb-4">
-          {columns.map((column) => (
-            <div
-              key={column.id}
-              className="flex-shrink-0  bg-gray-100 p-4 rounded-lg shadow-md min-w-64 md:min-w-80"
-            >
-              <Column
-                column={column}
-                onDeleteColumn={() => handleDeleteColumn(column.id)}
-              />
-            </div>
-          ))}
+    <div className="flex flex-col bg-gradient-to-r from-blue-100 via-green-50 to-purple-150 flex-grow ">
+      <main className=" container mx-auto px-4 py-6 h-full">
+        <div className="flex justify-center items-center gap-4 mb-8">
+          <div className="flex-1 max-w-sm">
+            <Input
+              type="text"
+              value={columnTitle}
+              onChange={(e) => setColumnTitle(e.target.value)}
+              placeholder="Create new column..."
+              className="h-10"
+            />
+          </div>
+          <Button onClick={handleAddColumn} className="h-10">
+            <PlusCircle className="h-4 w-4 mr-2" />
+            Add Column
+          </Button>
         </div>
-      </DragDropContext>
+
+        <DragDropContext onDragEnd={onDragEnd}>
+          {columns.length === 0 ? (
+            <div className="h-full w-full flex justify-center items-center">
+              <p className="text-gray-500">
+                Manage and schedule your tasks with ease!
+              </p>
+            </div>
+          ) : (
+            <div className="flex mx-auto gap-6 overflow-x-auto w-full pb-4 h-full">
+              {columns.map((column) => (
+                <Column
+                  key={column.id}
+                  column={column}
+                  todos={column.todos}
+                  onDeleteColumn={() => handleDeleteColumn(column.id)}
+                />
+              ))}
+            </div>
+          )}
+        </DragDropContext>
+      </main>
     </div>
   );
 };

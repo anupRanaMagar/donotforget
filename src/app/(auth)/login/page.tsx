@@ -1,7 +1,6 @@
 import { signIn } from "@/auth";
 import { Button } from "@/components/ui/button";
 import { GithubIcon } from "lucide-react";
-import { redirect } from "next/navigation";
 import React from "react";
 
 function Page() {
